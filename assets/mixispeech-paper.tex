@@ -1,0 +1,746 @@
+\documentclass[10pt,twoside]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[letterpaper,textwidth=12.2cm,textheight=19.3cm,top=3.0cm,asymmetric]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{graphicx}
+\graphicspath{{figures/}{paper/figures/}}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{url}
+\usepackage{enumitem}
+\usepackage{float}
+\usepackage[font=small,labelfont=bf,labelsep=period]{caption}
+\usepackage{fancyhdr}
+\usepackage[colorlinks=true,citecolor=blue,urlcolor=blue,linkcolor=blue]{hyperref}
+\usetikzlibrary{arrows.meta,positioning,calc,fit,backgrounds}
+
+\renewcommand{\figurename}{Fig.}
+\setlength{\parindent}{1em}
+\setlength{\parskip}{0pt}
+\setlist[itemize]{label=\textendash,leftmargin=1.2em,itemsep=0.1em,topsep=0.25em}
+
+\definecolor{paperBlue}{RGB}{37,99,235}
+\definecolor{paperCyan}{RGB}{6,182,212}
+\definecolor{paperGreen}{RGB}{22,163,74}
+\definecolor{paperOrange}{RGB}{234,88,12}
+\definecolor{paperInk}{RGB}{15,23,42}
+\definecolor{paperGray}{RGB}{100,116,139}
+\definecolor{paperLight}{RGB}{248,250,252}
+\definecolor{paperBorder}{RGB}{203,213,225}
+
+\newcommand{\method}{MixiSpeech}
+\newcommand{\mat}{MAT}
+\newcommand{\rtf}{RTF}
+\newcommand{\xfinal}{x_{\mathrm{final}}}
+\newcommand{\xhat}{\hat{x}_{\mathrm{final}}}
+\newcommand{\best}[1]{\textbf{#1}}
+\newcommand{\pending}{\textit{TBD}}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE]{\small\thepage\hspace{2.0em}MixiSpeech Team}
+\fancyhead[RO]{\small\method: One-Step TTS Distillation\hspace{2.0em}\thepage}
+\renewcommand{\headrulewidth}{0pt}
+
+\begin{document}
+\thispagestyle{empty}
+
+\begin{center}
+\vspace*{0.45cm}
+{\LARGE\bfseries
+\method: Progressive One-Step Distillation\\
+for Vietnamese--English Text-to-Speech\par}
+\vspace{0.85cm}
+{\normalsize
+MixiSpeech Team\textsuperscript{1}\\}
+\vspace{0.35cm}
+{\small
+\textsuperscript{1}MixiSpeech Research, Hanoi, Vietnam\\
+\texttt{mixispeech@mixiuniversal.com}}
+\end{center}
+
+\vspace{0.65cm}
+
+\begin{center}
+\begin{minipage}{0.88\textwidth}
+\small
+\noindent\textbf{Abstract.}
+Diffusion and flow-matching text-to-speech (TTS) systems produce high-quality
+speech, but iterative sampling makes deployment expensive for interactive
+applications. We present \method, a compact one-step student distilled from a
+multi-step Matcha-TTS teacher for Vietnamese--English speech synthesis. The core
+contributions are: (1) a trajectory-aware one-step distillation objective that
+combines final-state, velocity, and local pair-consistency supervision; (2) a
+progressive pair-stride curriculum
+$64 \rightarrow 32 \rightarrow 16 \rightarrow 8 \rightarrow 4 \rightarrow 2
+\rightarrow 1$ that transfers a 64-step teacher trajectory into a single
+student update; and (3) an empirical study showing that trajectory
+distillation recovers quality lost by naive one-step Matcha sampling while
+retaining one-step latency. On FLEURS Vietnamese evaluation, \method{} keeps the
+same 20.94M-parameter footprint and latency class as a naive one-step Matcha
+teacher, but improves UTMOS from $1.575$ to $2.264$, WER from $16.22\%$ to
+$12.84\%$, and CER from $8.15\%$ to $5.87\%$. Across 200 Vietnamese FLEURS
+prompts and 200 English VCTK prompts, the model uses one acoustic step and is
+substantially faster than 32/64-step teacher sampling. For reproducibility, we
+describe the Vietnamese--English data-processing pipeline and provide public
+evaluation scripts; audio samples and a live demo are available at
+\url{https://mixispeech.solanai.us/}.
+
+\vspace{0.55em}
+\noindent\textbf{Keywords:}
+Text-to-speech $\cdot$ Flow matching $\cdot$ Progressive distillation $\cdot$
+Vietnamese speech synthesis $\cdot$ Low-latency inference.
+\end{minipage}
+\end{center}
+
+\section{Introduction}
+
+\begingroup
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55em}
+
+Modern neural TTS systems often trade inference latency for quality. Diffusion
+and flow-based acoustic models~\cite{ddpm,flow_matching} refine a latent or mel representation through
+many sampling steps, which is acceptable for offline generation but costly for
+interactive applications. A tempting deployment shortcut is to reduce the number
+of solver steps directly. {\color{red}In our setting, however, the one-step Matcha teacher
+has the same 20.94M-parameter footprint and similar runtime as the student, but
+loses perceptual quality and intelligibility on Vietnamese evaluation.}
+
+\method{} addresses this gap with one-step distillation. Instead of supervising
+the student only on the final teacher sample, we distill dense teacher
+trajectories and combine final-state consistency, velocity matching, and local
+pair-consistency supervision. The resulting student performs a single acoustic
+update at inference time but learns from the geometry of the teacher's
+multi-step path.
+
+This paper makes five contributions. First, we show that naive one-step teacher
+sampling is not an adequate deployment baseline for Vietnamese technical and
+general speech. Second, we propose a progressive trajectory-consistency recipe
+that improves one-step quality without increasing inference steps. Third, we
+document the implemented composite-corpus pipeline and Matcha fine-tuning recipe
+used to produce the teacher and student checkpoints. Fourth, we evaluate
+\method{} against \mat-1, \mat-4, \mat-32, \mat-64, VieNeu-TTS, and F5-TTS on
+public Vietnamese and English evaluation data. Finally, we define a release
+boundary for the composite corpus, public prompt lists, objective-evaluation
+scripts, demo audio, and a blinded human listening protocol so the work can be
+independently audited without redistributing third-party audio outside its
+source licenses.
+
+This work is positioned relative to non-autoregressive and flow-based TTS
+systems such as FastSpeech~2, Glow-TTS, VITS, Matcha-TTS, Voicebox, E2 TTS, and
+F5-TTS~\cite{fastspeech2,glowtts,vits,matcha,voicebox,e2tts,f5tts}; iterative
+diffusion/flow acoustic models and their fast samplers
+\cite{ddpm,ddim,gradtts,difftts,prodiff}; and consistency/progressive
+distillation methods that motivate one-step generation
+\cite{progressive_distillation,consistency}. Unlike large zero-shot systems
+such as VALL-E~\cite{valle}, our goal is a small, auditable one-step acoustic
+student for the Vietnamese--English deployment setting.
+
+\endgroup
+
+\section{Method}
+
+\subsection{Teacher and Student}
+
+The teacher is a Matcha-TTS acoustic model fine-tuned for the MixiSpeech
+setting. At inference, the teacher can be sampled with different ODE/flow steps.
+We evaluate \mat-1, \mat-4, \mat-32, and \mat-64 to characterize the
+quality--latency trade-off of the original teacher.
+
+The student uses the same Matcha-family architecture footprint as the teacher,
+but is trained to predict the final teacher mel state from an intermediate
+teacher trajectory state. Let $x_t$ be a trajectory state at time $t$,
+$\xfinal$ be the final teacher state, and $c$ denote text, duration, and speaker
+conditioning. The student predicts a velocity field $v_\theta$ and forms a
+one-step final estimate:
+\begin{equation}
+  \xhat = x_t + (1 - t)\, v_\theta(x_t, t, c).
+  \label{eq:jump}
+\end{equation}
+
+\subsection{Progressive Pair-Consistency Distillation}
+
+The objective combines three terms:
+\begin{align}
+\mathcal{L}_{\mathrm{final}} &= \|\xhat - \xfinal\|_1, \\
+\mathcal{L}_{\mathrm{vel}} &= \left\|v_\theta(x_t,t,c) -
+  \frac{\xfinal - x_t}{1-t}\right\|_2^2, \\
+\mathcal{L}_{\mathrm{pair}} &= \|\Phi_\theta^{(r)}(x_i,t_i,c) - x_{i+r}\|_1, \\
+\Phi_\theta^{(r)}(x_i,t_i,c) &= x_i + (t_{i+r}-t_i)\,
+  v_\theta(x_i,t_i,c),
+\end{align}
+where $(x_i,x_{i+r})$ is a teacher-state pair selected at the current curriculum
+stride $r$, and $\Phi_\theta^{(r)}$ denotes the local student update toward the
+paired target state. The total loss is
+\begin{equation}
+  \mathcal{L} =
+  \lambda_f\mathcal{L}_{\mathrm{final}} +
+  \lambda_v\mathcal{L}_{\mathrm{vel}} +
+  \lambda_p\mathcal{L}_{\mathrm{pair}}.
+\end{equation}
+
+Dense 64-step teacher trajectories are distilled with progressively shorter pair
+strides:
+\begin{equation}
+  64 \rightarrow 32 \rightarrow 16 \rightarrow 8 \rightarrow 4 \rightarrow 2
+  \rightarrow 1.
+\end{equation}
+The schedule is inspired by progressive distillation and consistency-style
+learning, but the implemented recipe is a local hybrid: it retains direct
+final-state supervision while exposing the student to local trajectory pairs.
+{\color{red}The best checkpoint in the current experiments is selected from the progressive
+run around the stride-2 stage and remains one-step at inference.}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{arch.png}
+\caption{\method{} architecture and training flow. A frozen 64-step
+Matcha-TTS teacher generates dense acoustic trajectories offline. The one-step
+student is trained with final-state, velocity-matching, and local
+pair-consistency losses under a progressive stride curriculum. In the pair loss,
+$\Phi_\theta$ denotes a local stride update with $\Delta t=t_{i+r}-t_i$, while
+the final-state jump uses Eq.~\eqref{eq:jump}. At inference, only the trained
+student and frozen HiFi-GAN vocoder~\cite{hifigan} are used, so acoustic
+generation takes one student step.}
+\label{fig:architecture}
+\end{figure}
+
+\section{Implemented Data and Training Pipeline}
+
+The paper prototype follows the same pipeline used by the current local
+checkpoints. We describe it explicitly because it is easy to overstate the
+method if the teacher is treated as an abstract pretrained model. The current
+system first constructs a Matcha-compatible bilingual corpus, then fine-tunes a
+conditional-flow teacher, then extracts teacher trajectories for the student.
+
+\subsection{Audio Audit and Bilingual Manifests}
+
+All audio is standardized to 24 kHz and converted into Matcha filelists of the
+form \texttt{wav|speaker\_id|phonemes}. The dataset used here is not a single
+public corpus and is not introduced under an internal run name. It is a
+composite training filelist built from named sources. The starting
+Vietnamese/code-switch recipe in the previous draft contained audited VieNeu
+speech, PhoAudio Vietnamese audiobook speech, synthetic Vietnamese--English
+code-switch utterances, and a small Vietnamese math/chemistry subset. That
+earlier recipe contains 95,757 training utterances (169.79 h) over 209 speakers,
+with manifest components VieNeu 70,258; PhoAudio 13,073; code-switch 11,749; and
+technical 677. The current teacher corpus uses this data design as its baseline
+and adds the additional data used in this work: LibriTTS-R English speech and a
+small VietMix code-switch augmentation. For reproducibility,
+Table~\ref{tab:composite_data}
+reports both the earlier recipe summary and the active manifests used by the
+current experiments.
+
+The upstream VieNeu audit keeps 73,524 of 73,882 rows over 193 speakers. The
+rejection rules cover long leading or trailing silence, low speech ratio,
+invalid duration, and frontend incompatibility; rejected items are written to
+audit summaries instead of being silently mixed into training. LibriTTS-R
+\texttt{train-clean-100} and \texttt{train-clean-360} contribute the English
+side~\cite{libritts,librittsr} and are capped at about 100 training hours to
+avoid overwhelming the Vietnamese target domain. The text frontends are
+language-specific before they enter Matcha: Vietnamese uses the VieNeu IPA
+frontend, and English uses
+\texttt{english\_cleaners2} followed by the same IPA simplifier. The resulting
+speaker map has \texttt{n\_spks}=1348 and the mel statistics are fixed at mean
+$-5.5434$ and standard deviation $2.5716$.
+
+\begin{table}[H]
+\centering
+\caption{Composite Matcha-compatible filelists used by the teacher
+fine-tuning pipeline. The first row spells out the earlier Vietnamese/code-switch
+recipe from the previous draft; the remaining rows report the current bilingual
+teacher manifests used in this paper. Hours are computed from the processed
+manifests and code-switch filelists.}
+\label{tab:composite_data}
+\scriptsize
+\setlength{\tabcolsep}{3.8pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}llrrrl@{}}
+\toprule
+Split & Component & Rows & Hours & Speakers & Notes \\
+\midrule
+Reference & Previous Vietnamese/code-switch recipe & 95,757 & 169.79 & 209 & VieNeu, PhoAudio, code-switch, technical \\
+\midrule
+Train & Current Vietnamese side & 84,008 & 152.42 & 209 & VieNeu 70,258; PhoAudio 13,073; technical 677 \\
+Train & LibriTTS-R train-clean-100/360 & 61,931 & 100.00 & 1,128 & English cleaners + IPA simplifier \\
+Train & VietMix code-switch augment & 561 & 0.93 & 1 & VieNeu v3 Turbo, speaker id 74 \\
+\midrule
+Train & Final composite teacher filelist & 146,500 & 253.35 & 1,348 & Vietnamese + English + VietMix \\
+\midrule
+Validation & Base bilingual & 1,516 & 2.62 & 587 & Vietnamese + English validation \\
+Validation & VietMix code-switch augment & 30 & 0.05 & 1 & same frontend and speaker id \\
+Validation & Final composite teacher filelist & 1,546 & 2.67 & 587+ & Vietnamese + English + VietMix \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\subsection{Dataset Positioning and Release Boundary}
+
+For an international submission, we do not position the composite training
+filelist as a new benchmark dataset. It is a training recipe assembled from
+named Vietnamese, English, technical, and code-switch sources, and some source
+audio may be redistributable only through its original provider. The reproducible
+part of the contribution is therefore the processing boundary: audit rules,
+frontend normalization, filelist construction, prompt lists, evaluation scripts,
+and demo audio generated by the evaluated systems.
+
+\begin{table}[H]
+\centering
+\caption{Dataset and artifact release plan. The submission separates training
+data used to fit the teacher from public evaluation prompts and auditable
+artifacts. This avoids claiming a proprietary or partly synthetic training mix as
+a public benchmark while still making the evaluation path reproducible.}
+\label{tab:release_boundary}
+\footnotesize
+\setlength{\tabcolsep}{3.0pt}
+\begin{tabular}{@{}p{0.22\textwidth}p{0.20\textwidth}p{0.28\textwidth}p{0.21\textwidth}@{}}
+\toprule
+Artifact & Role in paper & Public/review release & License boundary \\
+\midrule
+Vietnamese manifests & VieNeu, PhoAudio, and technical teacher training & derived manifests, audit stats, cleaners & audio follows source-provider terms \\
+LibriTTS-R subset & English teacher training & subset recipe and filelist builder & public corpus citation and license \\
+VietMix code-switch text & augmentation and stress prompts & accepted/rejected text IDs, generator recipe & text source and TTS-provider terms \\
+FLEURS \texttt{vi\_vn}, VCTK prompts & objective evaluation only & exact 200+200 prompt IDs and scripts & public benchmark data; no train overlap \\
+Demo and human-study audio & qualitative inspection & hosted demo, anonymized listening scores & generated outputs, not raw third-party audio \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This framing keeps the paper's empirical claim focused: \method{} is evaluated
+on public held-out prompts and human review audio, while the training corpus is
+described as an engineering recipe rather than as a new dataset contribution.
+For a camera-ready version, the prompt IDs, system outputs used in human tests,
+and anonymized listener scores should be archived with the demo page.
+
+\subsection{Code-Switch Augmentation}
+
+The current run does not replace the corpus with fully LLM-generated text.
+Instead, LLM-generated sentences are reserved for hard-case prompting and
+frontend stress tests. The added training augmentation used here comes from the
+public
+\texttt{razent/vietmix} split, filtered to short Vietnamese--English
+code-switch utterances. From 1,002 candidate texts, 591 are accepted and
+synthesized with VieNeu-TTS v3 Turbo using the \textit{Truc Ly} voice. The
+synthetic audio is constrained to 0.35--18.0 s, resampled to 24 kHz, phonemized
+with the same Vietnamese/English mixed frontend, and assigned to an existing
+speaker slot, \texttt{capybara1812\_1056} (\texttt{speaker\_id}=74). The split
+adds 561 utterances to teacher training and 30 to validation.
+
+This augmentation is intentionally small compared with the bilingual base. Its
+role is not to dominate the acoustic distribution, but to expose the Matcha
+teacher to the code-switch and technical-token patterns that appeared in manual
+testing, such as Latin abbreviations, English product words inside Vietnamese
+sentences, and formula-like text after frontend normalization.
+
+\subsection{Matcha Teacher Fine-Tuning}
+
+The teacher is trained with the composite Vietnamese--English Matcha
+configuration with added code-switch rows, summarized in
+Table~\ref{tab:composite_data}. The acoustic
+representation uses 80 mel bins, FFT size 1024, hop length 256, window length
+1024, and frequency range 0--8 kHz. Training uses the IPA simplifier cleaner,
+blank-token insertion, batch size 8, eight workers, and no precomputed duration
+loading. The model keeps the Matcha vocabulary size at 187 and output size at
+172.
+
+Fine-tuning is initialized strictly from the previous bilingual teacher
+checkpoint. The current composite-corpus experiment validates every 2,000
+optimizer steps, logs every 50 steps, and saves the top three checkpoints every
+2,000 steps with a 50,000-step training budget. The active teacher used for
+trajectory extraction and evaluation in this paper is the last checkpoint from
+the run started on 15 July 2026 at 02:41:25.
+
+\subsection{Trajectory Dump and Student Run}
+
+After teacher fine-tuning, the current student run dumps dense teacher
+trajectories only for the added VietMix code-switch subset, not for the entire
+composite teacher filelist. The dump uses the active composite-corpus teacher
+with 64 flow steps, all state indices 0--63, temperature 0.667, and length scale
+1.0. It produces 560 usable training trajectories and 30 validation
+trajectories; each item stores the source waveform path, speaker id, text,
+mel-frame metadata, teacher step count, state times, and serialized trajectory
+tensors.
+
+Student training then follows the progressive schedule
+$64,32,16,8,4,2,1$. Each stage trains for 2,000 updates with batch size 4,
+mixed precision on CUDA, learning rate $2\times 10^{-5}$, validation every 500
+steps, and checkpointing every 1,000 steps. To keep conditioning stable and to
+reduce the number of moving parts, the text encoder and speaker embedding are
+frozen; only the Matcha decoder is trainable. The implemented loss weights are
+$\lambda_f=1.0$, $\lambda_v=0.1$, and $\lambda_p=0.25$. The final run writes
+\texttt{student\_last.ckpt}, while the best checkpoint selected by validation is
+from the stride-2 stage in the same progressive run.
+
+\section{Experimental Setup}
+
+\subsection{Systems}
+
+We compare \method{} against four teacher sampling regimes, \mat-1, \mat-4,
+\mat-32, and \mat-64. The Matcha teacher and the \method{} student share the
+same 20.94M-parameter architecture footprint. We also include VieNeu-TTS v3
+Turbo, VieNeu-TTS v2, and F5-TTS as larger pretrained reference systems. These
+references are useful for deployment context, but they are not parameter-matched
+to \method{}.
+
+\subsection{Evaluation Data and Metrics}
+
+The public objective evaluation uses 200 Vietnamese prompts from FLEURS
+\texttt{vi\_vn} test~\cite{fleurs} and 200 English prompts from VCTK
+v0.92~\cite{vctk}. With eight
+systems, the benchmark synthesizes 3,200 audio files. We report peak CPU RAM,
+peak GPU RAM, average inference seconds, average real-time factor, UTMOS, WER,
+and CER. Vietnamese ASR uses PhoWhisper-tiny~\cite{phowhisper}; English ASR
+uses Whisper-tiny~\cite{whisper}. UTMOS uses the SpeechMOS UTMOS22
+model~\cite{utmos}. WER and CER are diagnostic automatic metrics and do not
+replace human MOS or ABX tests.
+
+\subsection{Human Listening Study Protocol}
+
+To make the result suitable for a conference submission, the automatic
+evaluation is paired with a blinded human review round. The review set should
+contain 60 prompts: 30 Vietnamese FLEURS prompts, 15 Vietnamese technical
+normalization prompts covering numbers, chemistry, and math, and 15
+Vietnamese--English code-switch prompts from the VietMix-derived stress set.
+System names are hidden and audio is randomized per listener. We recommend at
+least 20 Vietnamese listeners, with each utterance rated by at least five
+listeners after balancing for fatigue. The form asks for 5-point naturalness MOS,
+5-point intelligibility MOS, and AB preference against the latency-matched
+\mat-1 baseline. The final paper should report mean $\pm$ 95\% confidence
+intervals and a paired preference test.
+
+\begin{table}[H]
+\centering
+\caption{Blinded human listening-study design for the review round. The score
+columns in Table~\ref{tab:human_eval_template} are intentionally left pending in
+this draft and should be filled only after collecting listener ratings.}
+\label{tab:human_eval_protocol}
+\scriptsize
+\setlength{\tabcolsep}{4.0pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}llrrl@{}}
+\toprule
+Prompt group & Purpose & Prompts & Systems & Human metrics \\
+\midrule
+FLEURS \texttt{vi\_vn} & public Vietnamese naturalness/intelligibility & 30 & 4--5 & MOS, intelligibility, AB preference \\
+Technical Vietnamese & frontend robustness for math/chemistry text & 15 & 4--5 & MOS, error flag, AB preference \\
+VietMix code-switch & Vietnamese--English mixed utterances & 15 & 4--5 & MOS, code-switch correctness, AB preference \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\section{Results}
+
+\begin{table}[H]
+\centering
+\caption{Public objective evaluation. Each model is evaluated on 200
+Vietnamese prompts and 200 English prompts. Arrows in column headers indicate
+the preferred direction. Bold marks the best value within each evaluation split;
+ties are bolded.}
+\label{tab:public_eval}
+\scriptsize
+\setlength{\tabcolsep}{2.7pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}llrrrrrrrr@{}}
+\toprule
+Model & Benchmark & Params $\downarrow$ & CPU $\downarrow$ & GPU $\downarrow$ & Infer $\downarrow$ & \rtf{} $\downarrow$ & UTMOS $\uparrow$ & WER $\downarrow$ & CER $\downarrow$ \\
+& & (M) & GiB & GiB & s & & & \% & \% \\
+\midrule
+\textbf{\method-1} & FLEURS vi\_vn & \best{20.94} & 2.41 & \best{1.38} & \best{0.040} & \best{0.005} & 2.264 & 12.84 & 5.87 \\
+\mat-1 teacher & FLEURS vi\_vn & \best{20.94} & 2.41 & 1.49 & 0.041 & \best{0.005} & 1.575 & 16.22 & 8.15 \\
+\mat-4 teacher & FLEURS vi\_vn & \best{20.94} & 2.41 & 1.49 & 0.056 & 0.006 & 2.143 & 17.62 & 9.08 \\
+\mat-32 teacher & FLEURS vi\_vn & \best{20.94} & 2.42 & 1.49 & 0.191 & 0.022 & 2.188 & 18.82 & 9.49 \\
+\mat-64 teacher & FLEURS vi\_vn & \best{20.94} & 2.47 & 1.49 & 0.343 & 0.040 & 2.194 & 18.86 & 9.52 \\
+VieNeu-TTS v3 Turbo & FLEURS vi\_vn & 152.88 & \best{2.39} & 2.01 & 1.310 & 0.189 & 2.530 & \best{12.24} & \best{5.43} \\
+VieNeu-TTS v2 & FLEURS vi\_vn & 293.67 & 3.33 & 1.90 & 2.147 & 0.330 & 2.767 & 13.07 & 5.73 \\
+F5-TTS & FLEURS vi\_vn & 337.10 & 2.89 & 2.63 & 0.190 & 0.024 & \best{3.040} & 14.35 & 6.74 \\
+\midrule
+\textbf{\method-1} & VCTK v0.92 & \best{20.94} & 2.41 & \best{1.38} & \best{0.018} & \best{0.005} & 3.560 & 8.04 & 3.06 \\
+\mat-1 teacher & VCTK v0.92 & \best{20.94} & 2.41 & 1.49 & 0.019 & \best{0.005} & 3.491 & 2.72 & 0.76 \\
+\mat-4 teacher & VCTK v0.92 & \best{20.94} & 2.41 & 1.49 & 0.029 & 0.009 & 4.160 & 3.08 & 0.91 \\
+\mat-32 teacher & VCTK v0.92 & \best{20.94} & 2.42 & 1.49 & 0.121 & 0.035 & 4.179 & 3.52 & 1.07 \\
+\mat-64 teacher & VCTK v0.92 & \best{20.94} & 2.47 & 1.49 & 0.228 & 0.066 & 4.177 & 3.60 & 1.13 \\
+VieNeu-TTS v3 Turbo & VCTK v0.92 & 152.88 & \best{2.39} & 2.01 & 0.757 & 0.188 & 4.136 & 4.22 & 1.44 \\
+VieNeu-TTS v2 & VCTK v0.92 & 293.67 & 3.33 & 1.90 & 2.581 & 0.335 & 3.615 & 25.74 & 105.60 \\
+F5-TTS & VCTK v0.92 & 337.10 & 2.89 & 2.63 & 0.207 & 0.035 & \best{4.374} & \best{1.62} & \best{0.37} \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Vietnamese target distillation ablation on 200 FLEURS \texttt{vi\_vn}
+prompts. The full row is the validation-selected checkpoint used in the main
+system; ablation rows are 14k-update final checkpoints trained from the same
+composite-corpus teacher. Arrows indicate the preferred direction. The rightmost
+column averages WER and CER to summarize target ASR error. Bold marks the best
+value; ties are bolded.}
+\label{tab:distill_ablation}
+\scriptsize
+\setlength{\tabcolsep}{3.0pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}lrrrrrrrrr@{}}
+\toprule
+Ablation & N & Params $\downarrow$ & CPU $\downarrow$ & GPU $\downarrow$ & Infer $\downarrow$ & \rtf{} $\downarrow$ & WER $\downarrow$ & CER $\downarrow$ & Avg. ASR $\downarrow$ \\
+& & (M) & GiB & GiB & s & & \% & \% & error \% \\
+\midrule
+Full: progressive + $\mathcal{L}_{pair}$ (ours) & 200 & \best{20.94} & \best{2.41} & \best{1.38} & \best{0.040} & \best{0.005} & \best{12.84} & \best{5.87} & \best{9.36} \\
+w/o $\mathcal{L}_{pair}$ & 200 & \best{20.94} & 2.43 & \best{1.38} & \best{0.040} & \best{0.005} & 13.23 & 6.05 & 9.64 \\
+w/o progressive curriculum & 200 & \best{20.94} & 2.45 & \best{1.38} & \best{0.040} & \best{0.005} & 13.22 & 6.16 & 9.69 \\
+Direct $\mathcal{L}_{jump}+\mathcal{L}_{vel}$ & 200 & \best{20.94} & \best{2.41} & \best{1.38} & \best{0.040} & \best{0.005} & 13.04 & 5.94 & 9.49 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\subsection{Human Listening Review Round}
+
+Table~\ref{tab:human_eval_template} is the score table for the listening review
+round. It is deliberately not populated with synthetic numbers. The paper should
+only submit human results after listener scores are collected from the protocol
+in Table~\ref{tab:human_eval_protocol}; until then, the automatic metrics in
+Tables~\ref{tab:public_eval}--\ref{tab:distill_ablation} should be treated as
+diagnostic evidence rather than final perceptual validation.
+
+\begin{table}[H]
+\centering
+\caption{Human evaluation table to be filled after blinded listening review.
+Nat. MOS and Intell. MOS use a 1--5 scale with 95\% confidence intervals.
+Preference is the percentage of AB comparisons preferring the listed system over
+the latency-matched \mat-1 baseline. Values are pending listener collection.}
+\label{tab:human_eval_template}
+\scriptsize
+\setlength{\tabcolsep}{3.2pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}lrrrrl@{}}
+\toprule
+System & Steps & Prompts & Nat. MOS $\uparrow$ & Intell. MOS $\uparrow$ & AB pref. vs \mat-1 $\uparrow$ \\
+\midrule
+\method-1 (ours) & 1 & 60 & \pending{} & \pending{} & \pending{} \\
+\mat-1 teacher & 1 & 60 & \pending{} & \pending{} & baseline \\
+\mat-64 teacher & 64 & 60 & \pending{} & \pending{} & \pending{} \\
+VieNeu-TTS v3 Turbo & reference & 60 & \pending{} & \pending{} & \pending{} \\
+F5-TTS & reference & 60 & \pending{} & \pending{} & \pending{} \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\subsection{Distillation Ablation}
+
+Table~\ref{tab:distill_ablation} addresses whether pair consistency and the
+progressive curriculum improve the target Vietnamese setting. The answer is
+positive for intelligibility: the full recipe gives the best FLEURS WER, CER,
+and average ASR error among the tested one-step students. Removing
+$\mathcal{L}_{pair}$ increases WER from 12.84\% to 13.23\% and CER from 5.87\%
+to 6.05\%. Removing the progressive curriculum while randomly sampling pair
+strides gives the highest CER, 6.16\%. The direct
+$\mathcal{L}_{jump}+\mathcal{L}_{vel}$ baseline remains competitive, but is
+worse than the full recipe on all three Vietnamese ASR error metrics.
+
+We do not claim that the full recipe wins every automatic diagnostic. In the
+same FLEURS run, the no-progressive variant has a slightly higher UTMOS
+(2.277 versus 2.264), and VCTK English diagnostics are less conclusive. On the
+code-switch sets used to motivate the augmentation, however, progressive
+distillation improves UTMOS over direct final-only training from 2.3959 to
+2.4613 on VietMix val30 and from 2.0837 to 2.1542 on VietMix stress200, with the
+same one-step inference budget. We therefore treat pair consistency and
+progressive scheduling as stabilizing trajectory supervision for the target
+Vietnamese/code-switch setting, not as a claim that one-step training is
+impossible without them.
+
+\subsection{Vietnamese Target Evaluation}
+
+Table~\ref{tab:public_eval} shows that \method{} and \mat-1 occupy the same
+runtime class on FLEURS Vietnamese: 0.040s versus 0.041s average inference
+time, both at 20.94M parameters. However, \method{} substantially improves the
+automatic quality and intelligibility metrics. UTMOS increases from 1.575 to
+2.264, WER decreases from 16.22\% to 12.84\%, and CER decreases from 8.15\% to
+5.87\%. This supports the main deployment claim: training a one-step student
+from teacher trajectories recovers substantial Vietnamese quality that is lost
+by naive one-step teacher sampling.
+
+The multi-step teacher improves perceptual quality relative to \mat-1, but
+incurs higher inference time. \mat-64 is 8.6$\times$ slower than \method{} on
+FLEURS under the measured setup. \method{} therefore targets the latency point
+of \mat-1 while recovering a meaningful part of the quality lost by naive step
+reduction.
+
+\subsection{English Diagnostic Evaluation}
+
+On VCTK, the teacher-family systems remain stronger in WER/CER, and F5-TTS
+reaches the highest UTMOS. This is expected because VCTK is an English corpus
+and the \method{} student is optimized for the target Vietnamese--English
+setting. We use VCTK as an out-of-domain English diagnostic rather than as the
+primary target claim.
+
+\section{Discussion}
+
+\method{} is not presented as an absolute-quality replacement for much larger
+pretrained TTS systems. F5-TTS and VieNeu-TTS remain strong references,
+especially in English naturalness and general pretrained coverage. The
+contribution is narrower and deployment-oriented: a one-step student can be
+trained to be meaningfully better than naive one-step teacher sampling at the
+same parameter count and latency class.
+
+The result matters because \mat-1 is the most direct one-step baseline. If a
+paper only compares a one-step student to \mat-64, the speedup is expected and
+does not prove that distillation is necessary. By including \mat-1, \mat-4,
+\mat-32, and \mat-64, the evaluation separates the effect of step count from the
+effect of trajectory-aware student training.
+
+\section{Limitations}
+
+The present draft includes a human-study protocol but not yet collected human
+scores. UTMOS, WER, and CER are useful for rapid iteration, but
+publication-quality validation should replace Table~\ref{tab:human_eval_template}
+with real MOS and preference results. WER/CER can also be biased by ASR behavior,
+especially for chemical formulas, math expressions, named entities, and
+code-switching. The current system is not a full reference-audio voice cloning
+model; it uses fixed speaker IDs for the Matcha-family systems and
+preset/reference voices for external baselines.
+
+\section{Conclusion}
+
+We introduced \method, a one-step Vietnamese--English TTS student distilled
+from a multi-step Matcha teacher. The method combines final-state supervision,
+velocity matching, and progressive pair consistency over dense teacher
+trajectories. On the primary Vietnamese public evaluation, \method{} keeps the
+speed and size of the one-step teacher baseline while improving UTMOS, WER, and
+CER. The results indicate that progressive trajectory distillation is a
+practical path toward low-latency TTS without relying solely on naive
+solver-step reduction.
+
+\paragraph{Reproducibility.}
+The main shell entry points are included with the repository:
+\begingroup
+\footnotesize
+\sloppy
+\begin{itemize}[leftmargin=1.5em,itemsep=0.1em,topsep=0.2em]
+\item data restore and manifest validation:
+\path{experiments/run_restore_vieneu_140h_tmux.sh};
+\item teacher fine-tuning:
+\path{experiments/run_mix5_resolved_teacher_tmux.sh} and
+\path{experiments/run_mix5_codeswitch_teacher_only_tmux.sh};
+\item progressive student distillation and trajectory dumping:
+\path{experiments/run_progressive_matcha_distill_tmux.sh};
+\item ablation training/evaluation:
+\path{experiments/run_distill_ablation_tmux.sh};
+\item public objective evaluation:
+\path{experiments/run_public_objective_eval.sh} with
+\path{experiments/configs/objective_eval_200.env};
+\item local Streamlit demo:
+\path{experiments/run_streamlit_mixispeech_tts_demo.sh}.
+\end{itemize}
+\endgroup
+\noindent
+The public objective run uses \texttt{VI\_LIMIT=200}, \texttt{EN\_LIMIT=200},
+FLEURS \texttt{vi\_vn}, VCTK v0.92, CUDA devices for synthesis/UTMOS, and all
+systems compared in Table~\ref{tab:public_eval}.
+
+\begin{thebibliography}{99}
+\bibitem{matcha}
+S. Mehta, R. Tu, J. Beskow, E. Sz\'ekely, and G. E. Henter, ``Matcha-TTS: A fast
+TTS architecture with conditional flow matching,'' in \emph{Proc. ICASSP}, 2024.
+
+\bibitem{flow_matching}
+Y. Lipman, R. T. Q. Chen, H. Ben-Hamu, M. Nickel, and M. Le, ``Flow matching
+for generative modeling,'' in \emph{Proc. ICLR}, 2023.
+
+\bibitem{ddpm}
+J. Ho, A. Jain, and P. Abbeel, ``Denoising diffusion probabilistic models,'' in
+\emph{Proc. NeurIPS}, 2020.
+
+\bibitem{ddim}
+J. Song, C. Meng, and S. Ermon, ``Denoising diffusion implicit models,'' in
+\emph{Proc. ICLR}, 2021.
+
+\bibitem{progressive_distillation}
+T. Salimans and J. Ho, ``Progressive distillation for fast sampling of diffusion
+models,'' in \emph{Proc. ICLR}, 2022.
+
+\bibitem{prodiff}
+R. Huang, Z. Zhao, H. Liu, J. Liu, C. Cui, and Y. Ren, ``ProDiff: Progressive
+fast diffusion model for high-quality text-to-speech,'' in \emph{Proc. ACM
+Multimedia}, 2022.
+
+\bibitem{consistency}
+Y. Song, P. Dhariwal, M. Chen, and I. Sutskever, ``Consistency models,'' in
+\emph{Proc. ICML}, 2023.
+
+\bibitem{fastspeech2}
+Y. Ren, C. Hu, X. Tan, T. Qin, S. Zhao, Z. Zhao, and T.-Y. Liu, ``FastSpeech 2:
+Fast and high-quality end-to-end text to speech,'' in \emph{Proc. ICLR}, 2021.
+
+\bibitem{glowtts}
+J. Kim, S. Kim, J. Kong, and S. Yoon, ``Glow-TTS: A generative flow for
+text-to-speech via monotonic alignment search,'' in \emph{Proc. NeurIPS}, 2020.
+
+\bibitem{vits}
+J. Kim, J. Kong, and J. Son, ``Conditional variational autoencoder with
+adversarial learning for end-to-end text-to-speech,'' in \emph{Proc. ICML},
+2021.
+
+\bibitem{gradtts}
+V. Popov, I. Vovk, V. Gogoryan, T. Sadekova, and M. Kudinov, ``Grad-TTS: A
+diffusion probabilistic model for text-to-speech,'' in \emph{Proc. ICML}, 2021.
+
+\bibitem{difftts}
+M. Jeong, H. Kim, S. Cheon, B. J. Choi, and N. S. Kim, ``Diff-TTS: A denoising
+diffusion model for text-to-speech,'' in \emph{Proc. Interspeech}, 2021.
+
+\bibitem{voicebox}
+M. Le et al., ``Voicebox: Text-guided multilingual universal speech generation
+at scale,'' in \emph{Proc. NeurIPS}, 2023.
+
+\bibitem{e2tts}
+S. E. Eskimez et al., ``E2 TTS: Embarrassingly easy fully non-autoregressive
+zero-shot TTS,'' arXiv preprint arXiv:2406.18009, 2024.
+
+\bibitem{f5tts}
+Y. Chen et al., ``F5-TTS: A fairytaler that fakes fluent and faithful speech
+with flow matching,'' arXiv preprint arXiv:2410.06885, 2024.
+
+\bibitem{valle}
+C. Wang et al., ``Neural codec language models are zero-shot text to speech
+synthesizers,'' arXiv preprint arXiv:2301.02111, 2023.
+
+\bibitem{hifigan}
+J. Kong, J. Kim, and J. Bae, ``HiFi-GAN: Generative adversarial networks for
+efficient and high fidelity speech synthesis,'' in \emph{Proc. NeurIPS}, 2020.
+
+\bibitem{fleurs}
+A. Conneau et al., ``FLEURS: Few-shot learning evaluation of universal
+representations of speech,'' in \emph{Proc. SLT}, 2022.
+
+\bibitem{vctk}
+C. Veaux, J. Yamagishi, and K. MacDonald, ``CSTR VCTK corpus: English
+multi-speaker corpus for CSTR voice cloning toolkit,'' University of Edinburgh,
+2017.
+
+\bibitem{libritts}
+H. Zen, V. Dang, R. Clark, Y. Zhang, R. J. Weiss, Y. Jia, Z. Chen, and Y. Wu,
+``LibriTTS: A corpus derived from LibriSpeech for text-to-speech,'' in
+\emph{Proc. Interspeech}, 2019.
+
+\bibitem{librittsr}
+Y. Koizumi et al., ``LibriTTS-R: A restored multi-speaker text-to-speech
+corpus,'' in \emph{Proc. Interspeech}, 2023.
+
+\bibitem{whisper}
+A. Radford et al., ``Robust speech recognition via large-scale weak
+supervision,'' in \emph{Proc. ICML}, 2023.
+
+\bibitem{phowhisper}
+V.-A. Nguyen et al., ``PhoWhisper: Automatic speech recognition for
+Vietnamese,'' arXiv preprint arXiv:2406.02555, 2024.
+
+\bibitem{utmos}
+T. Saeki, D. Xin, W. Nakata, T. Koriyama, S. Takamichi, and H. Saruwatari,
+``UTMOS: UTokyo-SaruLab system for VoiceMOS Challenge 2022,'' in
+\emph{Proc. Interspeech}, 2022.
+\end{thebibliography}
+
+\end{document}
