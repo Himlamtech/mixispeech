@@ -22,6 +22,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare paper figure
+        run: |
+          base64 --decode assets/mixispeech-overview.b64 > assets/mixispeech-overview.jpg
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          page = Path('index.html')
+          html = page.read_text()
+          html = re.sub(r'<svg class="method-svg".*?</svg>', '<img src="assets/mixispeech-overview.jpg" alt="MixiSpeech method overview" style="display:block;width:100%;margin:22px 0 4px;border:1px solid #edf1f3;border-radius:10px">', html, flags=re.S)
+          page.write_text(html)
+          PY
       - uses: actions/configure-pages@v5
         with:
           enablement: true
